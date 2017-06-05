@@ -1,20 +1,77 @@
 {-# LANGUAGE ConstraintKinds #-}
 module Language.IceT.VCGen where
-
-import Control.Monad.State
 import Language.IceT.Types
 import Language.IceT.SMT
+
+import Control.Monad.State
+import Data.List
 import Text.PrettyPrint.HughesPJ
 import Text.Printf
+import System.Exit
+import System.Process
+import GHC.IO.Handle
 
+-------------------------------------------------------------------------------
+-- IO one-stop-shop
+-------------------------------------------------------------------------------
+verify :: VCAnnot a
+       => [Binder] -- Variable Declarations
+       -> Stmt a   -- Program to verify
+       -> Prop a   -- Property to satisfy
+       -> IO Bool
+verify decls s φ
+  = do (inp, out, err, pid) <- runInteractiveProcess "z3" ["-smt2", "-in"] Nothing Nothing
+       hPutStr inp vcstr
+       hFlush inp
+       ec   <- waitForProcess pid
+       outp <- hGetContents out
+       errp <- hGetContents err
+       putStrLn outp
+       case ec of
+         ExitSuccess   -> return ("unsat" `isInfixOf` outp)
+         ExitFailure _ -> do putStrLn errp
+                             return False
+  where
+    vcstr = render $ vcGen decls s φ
+-------------------------------------------------------------------------------
+-- Build the VC
+-------------------------------------------------------------------------------
 type VCAnnot a = Show a 
 
-vcGen :: VCAnnot a => Stmt a -> Prop a -> Doc
-vcGen s p
-  = vcat $ fmap smt vcs
+vcGen :: VCAnnot a
+      => [Binder]
+      -> Stmt a
+      -> Prop a
+      -> Doc
+vcGen g s p
+  = vcat (prelude : declBinds g ++ [checkValid (And vcs)])
   where
     vcs       = pre : reverse (cond <$> sides st)
     (pre, st) = runState (wlp s p) (VCState { sides = [] })
+
+checkValid :: Prop a -> Doc
+checkValid f = parens (text "assert" <+> smt (Not f)) $+$ text "(check-sat)"
+
+declBinds :: [Binder] -> [Doc]
+declBinds = map declBind
+  where
+    declBind (Bind x s) = parens (text "declare-const" <+> text x <+> smt s)
+
+prelude :: Doc
+prelude
+  = text $ unlines [ "(define-sort Elt () Int)"
+                   , "(define-sort Set () (Array Elt Bool))"
+                   , "(define-sort IntMap () (Array Elt Elt))"
+                   , "(define-fun set_emp () Set ((as const Set) false))"
+                   , "(define-fun set_mem ((x Elt) (s Set)) Bool (select s x))"
+                   , "(define-fun set_add ((s Set) (x Elt)) Set  (store s x true))"
+                   , "(define-fun set_cap ((s1 Set) (s2 Set)) Set ((_ map and) s1 s2))"
+                   , "(define-fun set_cup ((s1 Set) (s2 Set)) Set ((_ map or) s1 s2))"
+                   , "(define-fun set_com ((s Set)) Set ((_ map not) s))"
+                   , "(define-fun set_dif ((s1 Set) (s2 Set)) Set (set_cap s1 (set_com s2)))"
+                   , "(define-fun set_sub ((s1 Set) (s2 Set)) Bool (= set_emp (set_dif s1 s2)))"
+                   , "(define-fun set_minus ((s1 Set) (x Elt)) Set (set_dif s1 (set_add set_emp x)))"
+                   ]
 
 -------------------------------------------------------------------------------
 -- Weakest Liberal Preconditions
@@ -41,7 +98,7 @@ wlp (Cases e cs _) p
            return (Atom Eq e (caseGuard c)  :=>: wp)
 
 wlp (ForEach x xs (rest, i) s) p
-  = do pre <- wlp s $ subst rest (Bin SetSubSingle erest ex) i
+  = do pre <- wlp s $ subst rest (Bin SetAdd erest ex) i
        return $ And [ subst rest EmptySet i
                     , Forall vs $ And [ i
                                       , Atom SetMem ex exs 
@@ -99,6 +156,23 @@ vint x = Bind x Int
 vmap :: Id -> Binder
 vmap x = Bind x (Map Int Int)
 
+vset :: Id -> Binder
+vset x = Bind x Set
+
+twoPhaseDecls :: [Binder]
+twoPhaseDecls = [ vint "proposal"
+                , vset "P"
+                , vint "committed"
+                , vint "abort"
+                , vmap "val"
+                , vmap "value"
+                , vint "c"
+                , vmap "id"
+                , vint "msg"
+                , vmap "pmsg"
+                , vint "reply"
+                ]
+
 twoPhase :: Stmt ()
 twoPhase
   = Seq [ vint "committed" :<-: false
@@ -114,8 +188,8 @@ twoPhase
             )
           ) $
           Seq [ vmap "id"  :<-: Store (Var "id") (Var "p") (Var "c")
-               , vmap "val" :<-: Store (Var "val") (Var "p") (Var "proposal")
-               ] ()
+              , vmap "val" :<-: Store (Var "val") (Var "p") (Var "proposal")
+              ] ()
 
         , ForEach (vint "p") (Bind "P" Set)
           ( "_rest"
@@ -177,4 +251,20 @@ twoPhase
 
     vabort  = Const 0
     vcommit = Const 1
-{-> vcGen twoPhase TT -}
+
+twoPhaseDebug :: Prop ()
+twoPhaseDebug
+  = Forall [vint "i"] $
+      And [ Atom SetMem (Var "i") (Var "P") ]
+      :=>:
+      Atom Eq (Select (Var "val") (Var "i")) (Var "proposal")
+
+twoPhaseSafety :: Prop ()
+twoPhaseSafety
+  = Forall [vint "i"] $
+      And [ Atom SetMem (Var "i") (Var "P"), Atom Eq (Var "committed") (Const 1) ]
+      :=>:
+      Atom Eq (Var "proposal")
+              (Select (Var "value") (Var "i"))
+{-> vcGen twoPhaseDecls twoPhase twoPhaseSafety
+-}

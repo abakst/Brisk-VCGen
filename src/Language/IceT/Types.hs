@@ -30,6 +30,7 @@ data Expr a = Const Int
 data Op     = Plus
             | Minus
             | SetSubSingle -- Xs - {x}
+            | SetAdd
   deriving (Eq, Show)
 
 writes :: Stmt a -> [Binder]

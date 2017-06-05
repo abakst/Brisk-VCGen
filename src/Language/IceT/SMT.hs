@@ -36,6 +36,7 @@ instance SMT Op where
   smt Plus  = text "+"
   smt Minus = text "-"
   smt SetSubSingle = text "set_minus"
+  smt SetAdd = text "set_add"
   
 instance SMT Rel where
   smt Eq     = text "="
