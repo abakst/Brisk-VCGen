@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+REWRITE="sicstus --noinfo --nologo -l brisk-sequentialize/main.pl --goal main."
+
+if [ "$#" -ne 1 ]; then
+  echo "Usage: $0 <file>"
+fi
+
+FILE="$1"
+REWRITECMD="${REWRITE} -a $FILE"
+
+$REWRITECMD | briskly
