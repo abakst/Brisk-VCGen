@@ -18,6 +18,9 @@ instance SMT (Prop a) where
 instance SMT Binder where
   smt b = parens (text (bvar b) <+> smt (bsort b))
 
+instance SMT Index where
+  smt _ = smt Int
+
 instance SMT Sort where
   smt Int       = text "Int"
   smt Set       = text "Set"

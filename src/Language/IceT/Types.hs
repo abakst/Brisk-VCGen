@@ -5,16 +5,23 @@ import Data.List
 -------------------------------------------------------------------------------
 type Id = String
 
+data Program a = Prog { decls   :: [Binder]
+                      , prog    :: Stmt a
+                      , ensures :: Prop a
+                      }  
+  deriving (Show)
+
 data Stmt a = Skip a
-            | Binder :<-: (Expr a)
+            | Assign Binder (Expr a) a
             | Seq [Stmt a] a
             | Cases (Expr a) [Case a] a
             | ForEach Binder Binder (Id, Prop a) (Stmt a)
-            | While Id (Stmt a)
+            | While Id (Stmt a) a
             deriving (Eq, Show)
 
 data Case a = Case { caseGuard :: Expr a
                    , caseStmt  :: Stmt a
+                   , caseAnnot :: a
                    }
   deriving (Eq, Show)
             
@@ -37,10 +44,10 @@ writes :: Stmt a -> [Binder]
 writes = nub . go
   where
     go (Skip _)           = []
-    go (x :<-: _)         = [x]
+    go (Assign x _ _)     = [x]
     go (Seq stmts _)      = stmts >>= go
     go (ForEach x _ _ s)  = x : go s
-    go (While _ s)        = go s
+    go (While _ s _)      = go s
     go (Cases _ cs _)     = cs >>= go . caseStmt
 -------------------------------------------------------------------------------
 -- Formulas
@@ -56,7 +63,10 @@ data Prop a = TT
             deriving (Eq, Show)
 data Binder = Bind { bvar :: Id, bsort :: Sort }
   deriving (Eq, Show)
-data Sort = Int | Set | Map Sort Sort
+data Sort = Int | Set | Map Index Sort
+  deriving (Eq, Show)
+data Index = SetIdx Id
+           | IntIdx
   deriving (Eq, Show)
 
 data Rel = Eq | Lt | SetMem
