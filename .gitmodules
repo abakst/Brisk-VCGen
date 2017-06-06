@@ -1,3 +1,4 @@
 [submodule "brisk-sequentialize"]
 	path = brisk-sequentialize
 	url = https://github.com/gleissen/brisk-sequentialize
+	branch = annot
