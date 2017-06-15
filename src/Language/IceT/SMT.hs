@@ -10,11 +10,11 @@ instance SMT (Prop a) where
   smt FF             = text "false"
   smt (Atom r e1 e2) = parens (smt r <+> smt e1 <+> smt e2)
   smt (Not p)        = parens (text "not" <+> (smt p))
-  smt (And ps)       = parens (text "and" $$ vcat (fmap smt ps))
+  smt (And ps)       = parens (text "and" <+> vcat (fmap smt ps))
   smt (Or ps)        = parens (text "or"  $$ vcat (fmap smt ps))
   smt (p :=>: q)     = parens (text "=>" <+> (smt p $+$ smt q))
-  smt (Forall xs p)  = parens (text "forall" <+> parens (vcat (fmap smt xs))
-                                             $+$ smt p)
+  smt (Forall xs p)  = parens (text "forall" <+> vcat [parens (vcat (fmap smt xs)), smt p])
+  smt (Prop n)       = text "I!"  <> int n
 instance SMT Binder where
   smt b = parens (text (bvar b) <+> smt (bsort b))
 
@@ -44,4 +44,5 @@ instance SMT Op where
 instance SMT Rel where
   smt Eq     = text "="
   smt Lt     = text "<"
+  smt Le     = text "<="
   smt SetMem = text "set_mem"

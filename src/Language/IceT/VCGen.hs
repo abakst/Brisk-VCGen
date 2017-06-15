@@ -2,12 +2,13 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
 module Language.IceT.VCGen (verifyFile, verifyProgram) where
+import Prelude hiding (and, or)
 import Language.IceT.Types
 import Language.IceT.SMT
 import Language.IceT.Parse (parseFile, parseString)
 
 import Control.Monad.State
-import Data.List
+import Data.List hiding (and, or)
 import qualified Data.Map.Strict as M
 import Text.PrettyPrint.HughesPJ
 import Text.Printf
@@ -28,6 +29,11 @@ verifyProgram
 verifyFile :: FilePath -> IO Bool
 verifyFile fp
   = parseFile fp >>= verify
+{-> parseFile "tests/par.input"
+
+Prog {decls = [Bind {bvar = "s", bsort = Set},Bind {bvar = "m", bsort = Int},Bind {bvar = "g", bsort = Int},Bind {bvar = "id", bsort = Map (SetIdx "s") Int}]
+, prog = Par "P" "s" TT (Seq [Seq [Assign (Bind {bvar = "id", bsort = Int}) (Const 0) "P",Assert (Atom Le (Const 0) (Var "id")) "P"] "",Seq [Assign (Bind {bvar = "id", bsort = Int}) (Bin Plus (Var "id") (Const 1)) "P",Assert (Atom Le (Const 0) (Var "id")) "P"] ""] "") "", ensures = Forall [Bind {bvar = "p", bsort = Int}] (Atom SetMem (Var "p") (Var "s") :=>: Atom Le (Const 0) (Select (Var "id") (Var "p")))}
+-}
 
 verify :: VCAnnot a
        => Program a
@@ -36,6 +42,7 @@ verify p
   = do (inp, out, err, pid) <- runInteractiveProcess "z3" ["-smt2", "-in"] Nothing Nothing
        hPutStr inp vcstr
        -- putStrLn vcstr
+       writeFile ".query.smt2" vcstr
        hFlush inp
        ec   <- waitForProcess pid
        outp <- hGetContents out
@@ -67,63 +74,42 @@ vcGen :: VCAnnot a
       -> Prop a
       -> Doc
 vcGen g s p
-  = vcat (prelude : declBinds g ++ [checkValid (And vcs)])
+  = vcat (prelude : declBinds bs ++ [checkValid vc])
   where
-    vcs       = pre : reverse (cond <$> sides st)
-    γ         = tyEnv g
-    (pre, st) = runState (liftSetStmt s >>= flip wlp p) (VCState { sides = [], tenv = γ, constrs = M.empty })
+    γ        = tyEnv g
+    bs       = fmap (uncurry Bind) . M.toList $ tenv st
+    (vc, st) = runState (replaceSorts s >>= flip wlp  p)
+                         (VCState { tenv = γ
+                                  , constrs = M.empty
+                                  , ictr = 0
+                                  , invs = []
+                                  , gather = False
+                                  })
 
--- The parsed types are wrong
-liftSetStmt :: VCAnnot a => Stmt a -> VCGen a (Stmt a)  
-liftSetStmt (Assign x e p)
-  = do t   <- getType (bvar x)
-       e'  <- ifM (isIndex t pid) isIdx (return e)
-       return $ Assign x{ bsort = t } e' p
-
-  where
-    pid   = process p
-    isIdx = do e' <- liftSetExpr e pid
-               return (Store (Var (bvar x)) (Var pid) e')
-liftSetStmt (ForEach x xs inv s)
-  = do addElem (bvar xs) (bvar x)
-       s' <- liftSetStmt s
-       removeElem (bvar x)
-       return (ForEach x xs inv s')
-liftSetStmt (Cases e cs p)
-  = do e'  <- liftSetExpr e (process p)
-       cs' <- mapM go cs
-       return $ Cases e' cs' p
-  where
-    go (Case g s q) = do g' <- liftSetExpr g (process q)
-                         s' <- liftSetStmt s
-                         return (Case g' s' q)
-liftSetStmt (While x s p)
-  = do s' <- liftSetStmt s
-       return (While x s' p)
-liftSetStmt (Seq stmts l)
-  = Seq <$> mapM liftSetStmt stmts <*> pure l
-liftSetStmt (Skip l)
-  = return $ Skip l
-
-
-liftSetExpr :: VCAnnot a => Expr a -> Id -> VCGen a (Expr a)
-liftSetExpr v@(Var x) p
-  = do t <- getType x
-       ifM (isIndex t p)
-           (return $ Select v (Var p)) 
-           (return v)
-liftSetExpr (Select e1 e2) p
-  = Select <$> liftSetExpr e1 p <*> liftSetExpr e2 p
-liftSetExpr (Store e1 e2 e3) p
-  = Store <$> liftSetExpr e1 p <*> liftSetExpr e2 p <*> liftSetExpr e3 p
-liftSetExpr (Bin o e1 e2) p
-  = Bin o <$> liftSetExpr e1 p <*> liftSetExpr e2 p
-liftSetExpr e _
-  = return e
+replaceSorts :: VCAnnot a => Stmt a -> VCGen a (Stmt a)
+replaceSorts (Assign x e l)
+  = do t <- getType (bvar x)
+       return $ Assign x { bsort = t } e l
+replaceSorts (Seq stmts l)
+  = flip Seq l <$> mapM replaceSorts stmts
+replaceSorts (ForEach x xs inv s l)
+  = ForEach x xs inv <$> replaceSorts s <*> pure l
+replaceSorts (If p s1 s2 l)
+  = If p <$> replaceSorts s1 <*> replaceSorts s2 <*> pure l
+replaceSorts (Par x xs inv s l)
+  = Par x xs inv <$> replaceSorts s <*> pure l
+replaceSorts (Atomic s l)
+  = flip Atomic l <$> replaceSorts s
+replaceSorts s@(Assert _ _ _)
+  = return s
+replaceSorts s@(Skip _)
+  = return s
+replaceSorts s
+  = error (printf "replaceSorts: %s" (show s))
 
 isIndex :: Sort -> Id -> VCGen a Bool
 isIndex (Map (SetIdx ps) _) p
-  = return True --isElem p ps
+  = isElem p ps
 isIndex _ _
   = return False
 
@@ -167,14 +153,20 @@ wlp (Skip _) p
 wlp (Assign _ NonDetValue _) p
   = return p
 
-wlp (Assign x e _) p
-  = return $ subst (bvar x) e p
+wlp (Assign x e l) p
+  = ifM (isIndex (bsort x) pr)
+        (return $ subst (bvar x) (Store (Var i) (Var pr) e) p)
+        (return $ subst (bvar x) e p)
+  where
+    i  = bvar x
+    pr = process l
 
 wlp (Seq stmts _) p
   = foldM (flip wlp) p (reverse stmts)
 
 wlp (Cases NonDetValue cs _) p
   = And <$> mapM (flip wlp p . caseStmt) cs
+
 wlp (Cases e cs _) p
   = And <$> mapM go cs
   where
@@ -182,8 +174,10 @@ wlp (Cases e cs _) p
       = do wp <- wlp (caseStmt c) p
            return (Atom Eq e (caseGuard c)  :=>: wp)
 
-wlp (ForEach x xs (rest, i) s) p
-  = do pre <- wlp s $ subst rest (Bin SetAdd erest ex) i
+wlp (ForEach x xs (rest, i) s _) p
+  = do addElem (bvar xs) (bvar x)
+       pre <- wlp s $ subst rest (Bin SetAdd erest ex) i
+       removeElem (bvar x)
        return $ And [ subst rest EmptySet i
                     , Forall vs $ And [ i
                                       , Atom SetMem ex exs 
@@ -199,26 +193,147 @@ wlp (ForEach x xs (rest, i) s) p
     erest     = Var rest
     vs        = x : Bind rest Set : writes s
 
+wlp (Par i is _ s _) p
+  = do modify $ \s -> s { tenv = M.insert (pcName is) (Map (SetIdx is) Int) (tenv s) }
+       addElem is i
+       bs      <- vcBinds
+       let (acts, outs) = as bs
+           actsLocs     = replaceHere i is <$> acts
+           exitCond     = Or [pcGuard i is x | x <- outs]
+       inv     <- actionsInvariant i0 is actsLocs
+       let qInv = and [ inv
+                      , pcGuard i0 is (-1) :=>: p
+                      ]
+           init = Forall [Bind i0 Int] $ and [ Atom SetMem (Var i0) (Var is)
+                                             , pcGuard i0 is 0
+                                             ]
+           initial = init :=>: Forall [Bind i0 Int] (subst i (Var i0) inv)
+       txns    <- mapM (wlpAction i is qInv) actsLocs
+       removeElem i
+       return $ and ([initial] ++ txns ++ [Forall bs (qInv :=>: p)])
+  where
+    as bs = actions s (CFG 0 [] ([Bind i Int]++bs) M.empty)
+    i0 = i ++ "!"
+    --    let inv' = subst p (Var p0) inv
+    -- p0   = p ++ "!!0"
+       -- return (Forall [Bind p0 Int] inv')
+
+wlp (Assert b pre _) p
+  = do g <- gets gather
+       if (g && pre) || (not g && not pre) then
+         return (and [b, p])
+       else
+         return p
+ 
+
+wlp (If c s1 s2 _) p
+  = do φ <- wlp s1 p
+       ψ <- wlp s2 p
+       return $ and [ c :=>: φ, Not c :=>: ψ ]
+
 wlp s _
   = error (printf "wlp TBD: %s" (show s))
+-------------------------------------------------------------------------------
+-- Build Invariant from Assertions
+-------------------------------------------------------------------------------
+actionsInvariant :: (Show a, Process a)
+                 => Id
+                 -> Id
+                 -> [Action a]
+                 -> VCGen a (Prop a)
+actionsInvariant p ps as
+  = and <$> mapM oneConj as
+  where
+    oneConj (Action _ _ _ _ s)
+     = gathering $ wlp s TT
 
+-------------------------------------------------------------------------------
+-- Actions
+-------------------------------------------------------------------------------
+wlpAction :: (Process a, Show a)
+          => Id
+          -> Id
+          -> Prop a
+          -> Action a
+          -> VCGen a (Prop a)
+wlpAction p ps inv (Action xs pcond i outs s)
+  = do inductive <- wlp s post
+       return $ Forall xs (g :=>: inductive)
+  where
+    post    = or [ invAt o | o <- outLocs ]
+    invAt l = subst (pcName ps) (Store (Var (pcName ps)) (Var p) (Const l)) inv
+    outLocs = if null outs then [-1] else snd <$> outs
+    g       = and [ pathGuard pcond, Atom SetMem (Var p) (Var ps), pcGuard p ps i, inv ]
+
+pathGuard :: [Prop a] -> Prop a
+pathGuard []   = TT
+pathGuard [p]  = p
+pathGuard ps   = and ps
+
+pcGuard :: Id -> Id -> Int -> Prop a
+pcGuard p ps i = Atom Eq (pc ps p) (Const i)
+
+
+replaceHere :: t -> Id -> Action a -> Action a
+replaceHere _ ps (Action xs cond i outs s)
+ = Action xs cond i outs (goStmt s)
+  where
+    goStmt (Assert φ b l)
+      = Assert (goProp φ) b l
+    goStmt (Seq stmts l)
+      = Seq (goStmt <$> stmts) l
+    goStmt (If c s1 s2 l)
+      = If c (goStmt s1) (goStmt s2) l
+    goStmt (ForEach x xs inv s l)
+      = ForEach x xs inv (goStmt s) l
+    goStmt s
+      = s
+
+    goProp (Here e)
+      = Atom Eq (Select (Var (pcName ps)) e) (Const i)
+    goProp (Forall xs a)
+      = Forall xs $ goProp a
+    goProp (a :=>: b)
+      = goProp a :=>: goProp b
+    goProp (And as)
+      = And (goProp <$> as)
+    goProp (Or as)
+      = Or (goProp <$> as)
+    goProp (Not a)
+      = Not $ goProp a
+    goProp a
+      = a
+--   = Seq (replaceHere i <$> stmts) l
+-- replaceHere i is (Assert p l)
+--   = Assert (hereProp i p) l
+
+-- hereProp i (Here e)
+--   = pcName
+
+  
 -------------------------------------------------------------------------------
 -- Monads
 -------------------------------------------------------------------------------
-data VCState a = VCState { sides :: [SideCondition a]
-                         , tenv  :: M.Map Id Sort
+data VCState a = VCState { tenv  :: M.Map Id Sort
                          , constrs :: M.Map Id Id
+                         , ictr :: Int
+                         , invs :: [(Int, [Binder], Prop a)]
+                         , gather :: Bool
                          }
 type VCGen a r = State (VCState a) r 
-data SideCondition a = Initiation { cond :: Prop a }
-                     | Inductive  { cond :: Prop a }
 
-addSideCondition :: SideCondition a -> VCGen a ()
-addSideCondition p
-  = modify $ \s -> s { sides = p : sides s }
+gathering :: VCGen a b -> VCGen a b  
+gathering mact
+  = do modify $ \s -> s { gather = True }
+       r <- mact
+       modify $ \s -> s { gather = False }
+       return r
 
 tyEnv :: [Binder] -> M.Map Id Sort
 tyEnv bs = M.fromList [ (x,t) | Bind x t <- bs ]
+
+vcBinds :: VCGen a [Binder]
+vcBinds =  fmap (uncurry Bind) . M.toList <$> gets tenv
 
 addElem :: Id -> Id -> VCGen a ()  
 addElem ps p
@@ -239,7 +354,6 @@ getType x
        case M.lookup x γ of
          Just t  -> return t
          Nothing -> error (printf "Unknown id: %s" x)
-  
 -------------------------------------------------------------------------------
 -- Scratch
 -------------------------------------------------------------------------------

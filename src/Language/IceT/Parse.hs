@@ -1,6 +1,8 @@
+{-# LANGUAGE ParallelListComp #-}
 module Language.IceT.Parse where
 import Language.IceT.Types
 import Text.ParserCombinators.Parsec
+import Text.ParserCombinators.Parsec.Expr
 import Text.ParserCombinators.Parsec.Language
 import qualified Text.ParserCombinators.Parsec.Token as Token
 
@@ -110,26 +112,77 @@ stmt =  skip
     <|> assignment
     <|> seqs
     <|> cases
+    <|> ite
     <|> foreach
+    <|> iter
     <|> while
+    <|> par
+    <|> atomic
+    <|> pre <|> assert
+
+pre        = do (Assert p _ w) <- functor "pre" $ assertBody
+                return (Assert p True w)
+assert     = functor "assert" $ assertBody
+assertBody = do w <- ident
+                comma
+                p <- prop <?> "prop"
+                return (Assert p False w)
+  
+
+par = functor "sym" $ do
+  p <- ident
+  comma
+  ps <- ident
+  comma
+  inv <- prop
+  comma
+  s <- stmt
+  return (Par p ps inv s "")
+
+atomic = do s <- functor "atomic" $ stmt
+            return (Atomic s "")
 
 skip, assignment, seqs, cases, foreach, while :: Parser (Stmt ParsedAnnot)
 skip = reserved "skip" >> return (Skip "")
 
 assignment = do reserved "assign"
-                parens $ do
+                parens $ do 
                   p <- ident
                   comma
-                  x <- ident
+                  lhs <- assignLHS
                   comma
-                  v <- expr
-                  return $ Assign (Bind x Int) v p
+                  rhs <- assignRHS
+                  matchAssign p lhs rhs
+  where
+    matchAssign p (Left is) (Left es)
+      | length is == length es
+      = return $ Seq ([Assign (Bind i Int) e p | i <- is | e <- es]) p
+    matchAssign p (Right i) (Right e)
+      = return $ Assign (Bind i Int) e p
+    assignLHS = (functor "pair" $ do
+                   is <- ident `sepBy1` comma 
+                   return (Left is))
+           <|> (Right <$> ident)
+    assignRHS = (functor "pair" $ do
+                   es <- expr `sepBy1` comma
+                   return (Left es))
+           <|> (Right <$> expr)
 
 seqs = do reserved "seq"
           stmts <- parens $ list stmt
           case stmts of
             [s] -> return s
             _   -> return $ Seq stmts ""
+
+ite = functor "ite" $ do
+  p <- ident
+  comma
+  test <- prop
+  comma
+  s1 <- stmt
+  comma
+  s2 <- stmt
+  return $ If test s1 s2 p
 
 cases = functor "cases" $ do
   p <- ident
@@ -163,6 +216,19 @@ foreach = functor "for" $ do
                    (Bind xs Set)
                    (rest, inv)
                    s
+                   ""
+iter = functor "iter" $ do
+  k <- ident
+  comma
+  inv <- prop
+  comma
+  s <- stmt
+  return $ ForEach (Bind "!iter" Int)
+                   (Bind k Set)
+                   ("!i", inv)
+                   s
+                   ""
+  
 prop = (reserved "true"  >> return TT)
    <|> (reserved "false" >> return FF)
    <|> atom
@@ -172,13 +238,21 @@ prop = (reserved "true"  >> return TT)
    <|> notProp
    <|> forallProp
    <|> elemProp
-
+   <|> hereProp
+   <|> doneProp
+   
+doneProp = functor "done" $ do
+  p <- ident
+  comma
+  ps <- ident
+  return $ Atom Eq (pc ps p) (Const (-1))
 atom = do e1 <- expr
           r  <- rel
           e2 <- expr
           return $ Atom r e1 e2
 
-rel = symbol "=" >> return Eq
+rel =  (symbol "="  >> return Eq)
+   <|> (symbol "<=" >> return Le)
 
 forallProp = functor "forall" $ do
   ds <- list decl
@@ -208,6 +282,8 @@ elemProp = functor "elem" $ do
   e2 <- expr
   return $ Atom SetMem e1 e2
 
+hereProp = functor "here" $ (Here <$> expr)
+
 while = do reserved "While"
            parens $ do
              who <- ident
@@ -217,7 +293,12 @@ while = do reserved "While"
              s <- stmt
              return $ While x s who
 
-expr = num <|> var <|> sel <|> sel' <|> ndet
+-- expr = num <|> var <|> sel <|> sel' <|> ndet <|> binexpr
+
+expr = buildExpressionParser table term <?> "expression"
+  where
+    table = [[Infix (reservedOp "+" >> return (Bin Plus)) AssocLeft]]
+    term  = num <|> var <|> sel <|> sel' <|> upd <|> ndet <?> "term"
 
 num = do i <- integer
          return $ Const (fromInteger i)
@@ -233,8 +314,13 @@ sel' = functor "ref" $ do
   comma
   e2 <- expr
   return (Select e1 e2)
+upd = functor "upd" $ do
+  Store <$> expr <*> (comma >> expr) <*> (comma >> expr)
 
-ndet = functor "ndet" whiteSpace >> return NonDetValue
+ndet = functor "ndet" (symbol "_") >> return NonDetValue
+
+op = symbol "+" >> return Plus
+
 
 list p = brackets $ commaSep p
 functor f p = reserved f >> parens p
@@ -250,6 +336,7 @@ parens     = Token.parens lexer
 brackets   = Token.brackets lexer
 commaSep   = Token.commaSep lexer
 symbol     = Token.symbol lexer
+reservedOp = Token.reservedOp lexer
 
 languageDef =
   emptyDef { Token.identStart    = letter
@@ -264,6 +351,8 @@ languageDef =
                                    , "ndet"
                                    , "assign"
                                    , "cases"
+                                   , "ite"
+                                   , "if"
                                    , "case"
                                    , "skip"
                                    , "prog"
@@ -279,8 +368,19 @@ languageDef =
                                    , "not"
                                    , "elem"
                                    , "sel"
+                                   , "upd"
                                    , "ref"
                                    , "ensures"
+                                   , "sym"
+                                   , "atomic"
+                                   , "done"
+                                   , "pair"
+                                   , "assert"
+                                   , "assume"
+                                   , "here"
                                    ]
-           , Token.reservedOpNames = [ "+", "<" ]
+           , Token.commentStart = "/*"
+           , Token.commentEnd   = "*/"
+           , Token.commentLine  = "//"
+           , Token.reservedOpNames = [ "+", "<", "<=" ]
            }
