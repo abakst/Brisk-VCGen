@@ -134,39 +134,55 @@ par = functor "sym" $ do
   comma
   ps <- ident
   comma
-  inv <- prop
-  comma
   s <- stmt
-  return (Par p ps inv s "")
+  return (Par p ps TT s "")
 
-atomic = do s <- functor "atomic" $ stmt
-            return (Atomic s "")
+atomic = do s <- functor "atomic" $ list stmt
+            case s of
+              [s'] -> return $ Atomic s' ""
+              _    -> return $ Atomic (Seq s "") ""
 
 skip, assignment, seqs, cases, foreach, while :: Parser (Stmt ParsedAnnot)
 skip = reserved "skip" >> return (Skip "")
 
-assignment = do reserved "assign"
-                parens $ do 
-                  p <- ident
-                  comma
-                  lhs <- assignLHS
-                  comma
-                  rhs <- assignRHS
-                  matchAssign p lhs rhs
-  where
-    matchAssign p (Left is) (Left es)
-      | length is == length es
-      = return $ Seq ([Assign (Bind i Int) e p | i <- is | e <- es]) p
-    matchAssign p (Right i) (Right e)
-      = return $ Assign (Bind i Int) e p
-    assignLHS = (functor "pair" $ do
-                   is <- ident `sepBy1` comma 
-                   return (Left is))
-           <|> (Right <$> ident)
-    assignRHS = (functor "pair" $ do
-                   es <- expr `sepBy1` comma
-                   return (Left es))
-           <|> (Right <$> expr)
+assignment = functor "assign" (try assignVars <|> assignConst)
+
+assignVars, assignConst :: Parser (Stmt ParsedAnnot)
+assignConst = do
+  p <- ident
+  comma
+  xs <- assignLHS
+  comma
+  es <- assignRHS
+  matchAssign p p xs es
+  
+assignVars = do 
+    p <- ident
+    comma
+    xs <- assignLHS
+    comma
+    q <- ident
+    comma
+    ys <- assignRHS
+    matchAssign p q xs ys
+
+matchAssign p q [i] [e]
+  = return $ Assign p (Bind i Int) q e p
+matchAssign p q is es
+  | length is == length es
+  = return $ Seq ([Assign p (Bind i Int) q e p | i <- is | e <- es]) p
+assignLHS = pairNested ident 
+assignRHS = pairNested expr
+
+pairNested p
+  = one <|> pair
+  where one  = do { i <- p; return [i] }
+        pair = functor "pair" $ do
+          i1 <- (pairNested p)
+          comma
+          i2 <- (pairNested p)
+          return (i1 ++ i2)
+
 
 seqs = do reserved "seq"
           stmts <- parens $ list stmt
@@ -203,6 +219,8 @@ casestmt = functor "case" $ do
   return $ Case e s p
 
 foreach = functor "for" $ do
+  who <- ident
+  comma
   x   <- ident
   comma
   xs  <- ident
@@ -216,7 +234,7 @@ foreach = functor "for" $ do
                    (Bind xs Set)
                    (rest, inv)
                    s
-                   ""
+                   who
 iter = functor "iter" $ do
   k <- ident
   comma
@@ -231,6 +249,7 @@ iter = functor "iter" $ do
   
 prop = (reserved "true"  >> return TT)
    <|> (reserved "false" >> return FF)
+   <|> (reserved "ndet" >> return NonDetProp)
    <|> atom
    <|> implies
    <|> andProp
@@ -298,26 +317,27 @@ while = do reserved "While"
 expr = buildExpressionParser table term <?> "expression"
   where
     table = [[Infix (reservedOp "+" >> return (Bin Plus)) AssocLeft]]
-    term  = num <|> var <|> sel <|> sel' <|> upd <|> ndet <?> "term"
+    term  = num <|> var <|> sel <|> upd <|> ndet <?> "term"
 
 num = do i <- integer
          return $ Const (fromInteger i)
 var = do i <- ident
          return $ Var i
-sel = functor "sel" $ do
-  e1 <- expr
-  comma
-  e2 <- expr
-  return (Select e1 e2)
-sel' = functor "ref" $ do
-  e1 <- expr
-  comma
-  e2 <- expr
-  return (Select e1 e2)
+sel = functor "sel" sel'
+  <|> functor "ref" sel'
+  <|> do {Select e1 e2 <- functor "varOf" sel'; return (Select e2 e1)}
+  where
+   sel' = do
+     e1 <- expr
+     comma
+     e2 <- expr
+     return (Select e1 e2)
+
+
 upd = functor "upd" $ do
   Store <$> expr <*> (comma >> expr) <*> (comma >> expr)
 
-ndet = functor "ndet" (symbol "_") >> return NonDetValue
+ndet = reserved "ndet" >> return NonDetValue
 
 op = symbol "+" >> return Plus
 
@@ -339,8 +359,8 @@ symbol     = Token.symbol lexer
 reservedOp = Token.reservedOp lexer
 
 languageDef =
-  emptyDef { Token.identStart    = letter
-           , Token.identLetter   = alphaNum
+  emptyDef { Token.identStart    = letter <|> char '_'
+           , Token.identLetter   = alphaNum <|> char '_'
            , Token.reservedNames = [ "par"
                                    , "seq"
                                    , "skip"
@@ -378,6 +398,7 @@ languageDef =
                                    , "assert"
                                    , "assume"
                                    , "here"
+                                   , "varOf"
                                    ]
            , Token.commentStart = "/*"
            , Token.commentEnd   = "*/"

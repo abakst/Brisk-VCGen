@@ -87,9 +87,9 @@ vcGen g s p
                                   })
 
 replaceSorts :: VCAnnot a => Stmt a -> VCGen a (Stmt a)
-replaceSorts (Assign x e l)
+replaceSorts (Assign p x q e l)
   = do t <- getType (bvar x)
-       return $ Assign x { bsort = t } e l
+       return $ Assign p x { bsort = t } q e l
 replaceSorts (Seq stmts l)
   = flip Seq l <$> mapM replaceSorts stmts
 replaceSorts (ForEach x xs inv s l)
@@ -150,13 +150,17 @@ wlp (Skip _) p
   = return p
 
 -- Fresh var
-wlp (Assign _ NonDetValue _) p
+wlp (Assign _ _ _ NonDetValue _) p
   = return p
 
-wlp (Assign x e l) p
-  = ifM (isIndex (bsort x) pr)
-        (return $ subst (bvar x) (Store (Var i) (Var pr) e) p)
-        (return $ subst (bvar x) e p)
+wlp (Assign a x b e l) p
+  = do select <- isSet b
+       let v = case e of
+                 Var i | select -> Select e (Var b)
+                 _  -> e
+       ifM (isIndex (bsort x) pr)
+          (return $ subst (bvar x) (Store (Var i) (Var pr) v) p)
+          (return $ subst (bvar x) v p)
   where
     i  = bvar x
     pr = process l
@@ -176,16 +180,19 @@ wlp (Cases e cs _) p
 
 wlp (ForEach x xs (rest, i) s _) p
   = do addElem (bvar xs) (bvar x)
-       pre <- wlp s $ subst rest (Bin SetAdd erest ex) i
+       i'  <- gathering $ wlp s TT
+       let i'' = subst (bvar xs) erest i'
+       let inv = and [i, i'']
+       pre <- wlp s $ subst rest (Bin SetAdd erest ex) inv
        removeElem (bvar x)
-       return $ And [ subst rest EmptySet i
-                    , Forall vs $ And [ i
+       return $ And [ subst rest EmptySet inv
+                    , Forall vs $ And [ inv
                                       , Atom SetMem ex exs 
                                       , Not $ Atom SetMem ex erest
                                       ]
                                   :=>:
                                   pre
-                    , Forall vs $ subst rest (Var (bvar xs)) i :=>: p
+                    , Forall vs $ subst rest (Var (bvar xs)) inv :=>: p
                     ]
   where
     ex        = Var (bvar x)
@@ -224,12 +231,13 @@ wlp (Assert b pre _) p
          return (and [b, p])
        else
          return p
- 
-
 wlp (If c s1 s2 _) p
   = do φ <- wlp s1 p
        ψ <- wlp s2 p
-       return $ and [ c :=>: φ, Not c :=>: ψ ]
+       let guard p q = case c of
+                         NonDetProp -> [p, q]
+                         _          -> [c :=>: p, Not c :=>: q]
+       return . and $ guard φ ψ
 
 wlp s _
   = error (printf "wlp TBD: %s" (show s))
@@ -347,6 +355,11 @@ isElem :: Id -> Id -> VCGen a Bool
 isElem p ps
   = do g <- gets constrs
        return $ maybe False (==ps) $ M.lookup p g
+
+isSet :: Id -> VCGen a Bool
+isSet i
+  = do g <- gets constrs
+       return $ M.member i g
 
 getType :: Id -> VCGen a Sort
 getType x

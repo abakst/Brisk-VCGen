@@ -12,7 +12,10 @@ main = do args <- getArgs
                       verifyProgram progstr >>= exit
             [f] -> verifyFile f >>= exit
             _   -> exitFailure
-  where exit True = do putStrLn "✓ SAFE"
+  where exit True = do putStrLn (green ++ "✓ SAFE")
                        exitSuccess
-        exit _    = do putStrLn "✗ UNSAFE"
+        exit _    = do putStrLn (red ++ "✗ UNSAFE")
                        exitFailure
+
+        green = "\x1b[32m"
+        red   = "\x1b[31m"

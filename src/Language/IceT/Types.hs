@@ -16,7 +16,7 @@ data Program a = Prog { decls   :: [Binder]
 
 data Stmt a = Skip a
             | Par Id Id (Prop a) (Stmt a) a
-            | Assign Binder (Expr a) a
+            | Assign Id Binder Id (Expr a) a
             | Seq [Stmt a] a
             | Atomic (Stmt a) a
             | Assume (Prop a) a
@@ -59,8 +59,9 @@ writes :: Stmt a -> [Binder]
 writes = nub . go
   where
     go (Skip _)           = []
+    go (If _ s1 s2 _)     = go s1 ++ go s2
     go (Atomic s _)       = go s
-    go (Assign x _ _)     = [x]
+    go (Assign _ x _ _ _) = [x]
     go (Seq stmts _)      = stmts >>= go
     go (ForEach x _ _ s _)= x : go s
     go (While _ s _)      = go s
@@ -91,7 +92,7 @@ buildCFG from (Atomic s _)
        bs <- gets binds
        modify $ \s -> s { c = i + 1, m = M.alter (ins (from + 1) TT) from (m s) }
        return (from+1, [Action bs p (from+1) [] s])
-buildCFG from s@(Assign _ _ l)
+buildCFG from s@(Assign _ _ _ _ l)
   = buildCFG from (Atomic s l)
 buildCFG from (Skip _)
   = return (from, [])
@@ -119,7 +120,7 @@ pushForLoop x xs act
        return r 
 
 assgn :: Id -> Id -> Stmt ()
-assgn x y = Atomic (Assign (Bind x Int) (Var y) ()) ()
+assgn x y = Atomic (Assign "" (Bind x Int) "" (Var y) ()) ()
 
 actions :: Stmt a -> CFG a -> ([Action a], [Int])
 actions s st0
@@ -151,6 +152,7 @@ data Prop a = TT
             | Forall [Binder] (Prop a)
             | Here (Expr a)
             | Prop Int
+            | NonDetProp
             deriving (Eq, Show)
 data Binder = Bind { bvar :: Id, bsort :: Sort }
   deriving (Eq, Show)
@@ -215,3 +217,4 @@ instance Subst Prop where
           go FF             = FF
           go (Prop i)       = Prop i
           go (Here e')      = Here $ subst x e e'
+          go (NonDetProp)   = NonDetProp

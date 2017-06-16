@@ -1,0 +1,54 @@
+prog(concdb, Decls, ensures(Property), par([sym(C,c,Client), while(db, true, DBLoop)]), while(db, true, DBLoop)) :-
+      append([decl(db, int), decl(c, set)], LocalDecls, Decls)
+    , append(ClientVars, DBVars, LocalDecls)
+    , Property=true
+    , ClientVars=[ decl(x, map(set(c), int))
+                 , decl(v, map(set(c), int))
+                 , decl(status, map(set(c), int))
+                 , decl(vv, map(set(c), int))
+                 ]
+    , Client=for(C, _, x, rr, true,
+	       seq([
+		    send(C, e_pid(db), pair(C, pair(0, pair(x, v)))),
+		    recv(C, e_pid(db), status),
+		    send(C, e_pid(db), pair(C, pair(1, pair(x, v)))),
+		    recv(C, e_pid(db), vv),
+		    assert(vv = v)
+		   ])
+	      )
+    , DBVars=[ decl(req, int)
+             , decl(id, int)
+             , decl(key, int)
+             , decl(val, int)
+             , decl(domain,map(int,int))
+             , decl(response_val,int)
+             , decl(response_tag,int)
+             , decl(the_db,map(int,int))]
+	, DBLoop=seq([
+		recv(db, e_pid(c), pair(id, pair(req, pair(key, val)))),
+		ite(db,
+		    req=0,
+		    ite(db, sel(domain,x)=1,
+			assign(db,pair(response_tag, response_val),pair(0, 0)),
+			seq([ assign(db,pair(response_tag, response_val), pair(1,_)),
+			      assign(db,domain,store(domain,key,1)),
+			      assign(db,the_db,store(the_db,key,val))
+			    ])
+		       ),
+		    ite(db,
+			sel(domain,key)=1,
+			seq([
+			     assign(db, tag, 1),
+			     assign(db,  v, sel(the_db,key)),
+			     assign(db, pair(response_tag, response_val), pair(tag, v))
+			    ]),
+			seq([
+			     assign(db, tag, 0),
+			     assign(db,  v, 0),
+			     assign(db, pair(response_tag, response_val), pair(tag, v))
+			    ])
+		       )
+		   ),
+		send(db, e_var(id), pair(response_tag, response_val))
+	       ])
+.
