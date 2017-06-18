@@ -5,6 +5,7 @@ module Language.IceT.VCGen (verifyFile, verifyProgram) where
 import Prelude hiding (and, or)
 import Language.IceT.Types
 import Language.IceT.SMT
+import Language.IceT.Pretty (pp, render)
 import Language.IceT.Parse (parseFile, parseString)
 
 import Control.Monad.State
@@ -42,6 +43,7 @@ verify p
   = do (inp, out, err, pid) <- runInteractiveProcess "z3" ["-smt2", "-in"] Nothing Nothing
        hPutStr inp vcstr
        -- putStrLn vcstr
+       writeFile ".query.icet" (render (pp (prog p)))
        writeFile ".query.smt2" vcstr
        hFlush inp
        ec   <- waitForProcess pid
@@ -60,14 +62,6 @@ verify p
 -------------------------------------------------------------------------------
 -- Build the VC
 -------------------------------------------------------------------------------
-type VCAnnot a = (Show a, Process a)
-
-class Process a where
-  process :: a -> Id
-
-instance Process Id where
-  process = id
-
 vcGen :: VCAnnot a
       => [Binder]
       -> Stmt a
@@ -93,11 +87,22 @@ replaceSorts (Assign p x q e l)
 replaceSorts (Seq stmts l)
   = flip Seq l <$> mapM replaceSorts stmts
 replaceSorts (ForEach x xs inv s l)
-  = ForEach x xs inv <$> replaceSorts s <*> pure l
+  = do g <- gets constrs
+       case M.lookup (process l) g of
+         Nothing -> 
+           ForEach x xs inv <$> replaceSorts s <*> pure l
+         Just ps ->
+           ForEach (liftSo x ps) xs inv <$> replaceSorts (subst (bvar x) xmap s) <*> pure l
+  where
+    liftSo x ps = x { bsort = Map (SetIdx ps) (bsort x) }
+    xmap        = Select (Var (bvar x)) (Var (process l))
 replaceSorts (If p s1 s2 l)
   = If p <$> replaceSorts s1 <*> replaceSorts s2 <*> pure l
 replaceSorts (Par x xs inv s l)
-  = Par x xs inv <$> replaceSorts s <*> pure l
+  = do addElem xs x
+       p <- Par x xs inv <$> replaceSorts s <*> pure l
+       removeElem x
+       return p
 replaceSorts (Atomic s l)
   = flip Atomic l <$> replaceSorts s
 replaceSorts s@(Assert _ _ _)
@@ -219,7 +224,7 @@ wlp (Par i is _ s _) p
        removeElem i
        return $ and ([initial] ++ txns ++ [Forall bs (qInv :=>: p)])
   where
-    as bs = actions s (CFG 0 [] ([Bind i Int]++bs) M.empty)
+    as bs = actions i s (CFG 0 [] ([Bind i Int]++bs) M.empty)
     i0 = i ++ "!"
     --    let inv' = subst p (Var p0) inv
     -- p0   = p ++ "!!0"

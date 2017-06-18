@@ -1,3 +1,6 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE ConstraintKinds #-}
 module Language.IceT.Types where
 import Prelude hiding (and, or)
 import Control.Monad.State
@@ -6,6 +9,14 @@ import Data.List as L hiding (and, or)
 -------------------------------------------------------------------------------
 -- Programs
 -------------------------------------------------------------------------------
+type VCAnnot a = (Show a, Process a)
+
+class Process a where
+  process :: a -> Id
+
+instance Process Id where
+  process = id
+
 type Id = String
 
 data Program a = Prog { decls   :: [Binder]
@@ -85,49 +96,53 @@ data CFG a = CFG { c     :: Int
                  , m     :: M.Map Int [(Prop a, Int)]
                  }  
 type CfgM s a = State (CFG s) a
-buildCFG :: Int -> Stmt a -> CfgM a (Int, [Action a])
-buildCFG from (Atomic s _)
+buildCFG :: VCAnnot a => Id -> Int -> Stmt a -> CfgM a (Int, [Action a])
+buildCFG w from (Atomic s _)
   = do i  <- gets c
        p  <- gets path
        bs <- gets binds
        modify $ \s -> s { c = i + 1, m = M.alter (ins (from + 1) TT) from (m s) }
        return (from+1, [Action bs p (from+1) [] s])
-buildCFG from s@(Assign _ _ _ _ l)
-  = buildCFG from (Atomic s l)
-buildCFG from (Skip _)
+buildCFG w from s@(Assign _ _ _ _ l)
+  = buildCFG w from (Atomic s l)
+buildCFG w from (Skip _)
   = return (from, [])
-buildCFG from (ForEach x xs (r, i) s l)
-  = do pushForLoop x xs $ do
-         (out, as) <- buildCFG from s
+buildCFG w from (ForEach x xs (r, i) s l)
+  = do pushForLoop w (process l) x xs $ do
+         (out, as) <- buildCFG w from s
          modify $ \s -> s { m = M.alter (ins (from+1) TT) out (m s) }
          return (out, as)
-buildCFG from (Seq ss _) = do (l, as) <- foldM go (from, []) ss
-                              return (l, concat as)
+buildCFG w from (Seq ss _) = do (l, as) <- foldM go (from, []) ss
+                                return (l, concat as)
   where
-    go (l, s0) s = do (l', s') <- buildCFG l s
+    go (l, s0) s = do (l', s') <- buildCFG w l s
                       return (l', s':s0)
-buildCFG _ s = error "buildCFG"
+buildCFG w _ s = error ("buildCFG\n" ++ show s)
 
-pushForLoop :: Binder -> Binder -> CfgM s a -> CfgM s a
-pushForLoop x xs act
+pushForLoop :: Id -> Id -> Binder -> Binder -> CfgM s a -> CfgM s a
+pushForLoop p q x xs act
   = do vs0 <- gets binds
        p0  <- gets path
        modify $ \s -> s { binds = x : vs0
-                        , path = Atom SetMem (Var $ bvar x) (Var $ bvar xs) : p0
+                        , path = grd : p0
                         }
        r  <- act
        modify $ \s -> s { binds = vs0, path = p0 }
        return r 
+  where
+    grd | p == q    = Atom SetMem (sel x p) (Var $ bvar xs) 
+        | otherwise =  Atom SetMem (Var $ bvar x) (Var $ bvar xs)
+    sel x p = Select (Var (bvar x)) (Var p)
 
 assgn :: Id -> Id -> Stmt ()
 assgn x y = Atomic (Assign "" (Bind x Int) "" (Var y) ()) ()
 
-actions :: Stmt a -> CFG a -> ([Action a], [Int])
-actions s st0
+actions :: VCAnnot a => Id -> Stmt a -> CFG a -> ([Action a], [Int])
+actions w s st0
   = ([ Action bs ps i (getOuts i) s | Action bs ps i _ s <- as ], exitNodes cfg)
   where
      cfg           = m st
-     ((_, as), st) = runState (buildCFG 0 s) st0  
+     ((_, as), st) = runState (buildCFG w 0 s) st0  
      getOuts i     = M.findWithDefault [] i cfg
 
 exitNodes :: M.Map Int [(Prop a, Int)] -> [Int]
@@ -136,7 +151,7 @@ exitNodes m = [ i | i <- outs, i `notElem` ins ]
     ins  = M.keys m
     outs = nub $ M.foldr' (\outs0 outs -> outs ++ (snd <$> outs0)) [] m
   
-cfg s = m . snd $ runState (buildCFG 0 s) (CFG 0 [] [] M.empty)
+cfg p s = m . snd $ runState (buildCFG p 0 s) (CFG 0 [] [] M.empty)
 
 
 -------------------------------------------------------------------------------
@@ -166,15 +181,15 @@ data Rel = Eq | Le |  Lt | SetMem
   deriving (Eq, Show)
 
 and :: [Prop a] -> Prop a
-and ps  = case compact ps of
+and ps  = case compact TT ps of
             []  -> TT
             [p] -> p
             ps'  -> And ps'
-or ps = case compact ps of
+or ps = case compact FF ps of
           [] -> FF
           [p] -> p
           ps' -> Or ps'
-compact ps = L.filter (/= TT) (simplify <$> ps)
+compact one ps = L.filter (/= one) (simplify <$> ps)
 simplify (p :=>: TT) = TT
 simplify (TT :=>: p) = p
 simplify (And ps)    = and ps
@@ -183,6 +198,21 @@ simplify p           = p
 
 class Subst b where
   subst :: Id -> (Expr a) -> b a -> b a
+
+instance Subst Stmt where
+  subst x a (Assign p y q e l)
+    = Assign p y q (subst x a e) l
+  subst x a (Seq stmts l)
+    = Seq (subst x a <$> stmts) l
+  subst x a for@(ForEach y xs inv s l)
+    | x /= bvar y = ForEach y xs (subst x a <$> inv) (subst x a s) l
+    | otherwise   = for
+  subst x a (Atomic s l)
+    = Atomic (subst x a s) l
+  subst x a (If p s1 s2 l)
+    = If (subst x a p) (subst x a s1) (subst x a s2) l
+  subst x a (Assert p b l)
+    = Assert (subst x a p) b l
 
 instance Subst Expr where
   subst _ _ (Const i)
