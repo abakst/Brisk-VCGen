@@ -17,9 +17,9 @@ import System.Exit
 import System.Process
 import GHC.IO.Handle
 
--- import Debug.Trace
--- dbg :: Show a => String -> a -> a
--- dbg msg x = trace (printf "[%s]: %s\n" msg (show x)) x
+import Debug.Trace
+dbg :: Show a => String -> a -> a
+dbg msg x = trace (printf "[%s]: %s\n" msg (show x)) x
 -------------------------------------------------------------------------------
 -- IO one-stop-shop
 -------------------------------------------------------------------------------
@@ -58,26 +58,29 @@ verify p
            putStrLn errp
            return False
   where
-    vcstr = render $ vcGen (decls p) (prog p) (ensures p)
+    vcstr = render $ vcGen (decls p) (cardDecls p) (prog p) (ensures p)
 -------------------------------------------------------------------------------
 -- Build the VC
 -------------------------------------------------------------------------------
 vcGen :: VCAnnot a
       => [Binder]
+      -> [Card a]
       -> Stmt a
       -> Prop a
       -> Doc
-vcGen g s p
-  = vcat (prelude : declBinds bs ++ [checkValid vc])
+vcGen g ks s p
+  = vcat (prelude : declBinds bs ++ declBinds (freshed st) ++ [checkValid vc])
   where
     γ        = tyEnv g
     bs       = fmap (uncurry Bind) . M.toList $ tenv st
     (vc, st) = runState (replaceSorts s >>= flip wlp  p)
                          (VCState { tenv = γ
                                   , constrs = M.empty
+                                  , freshed = []
                                   , ictr = 0
                                   , invs = []
                                   , gather = False
+                                  , cards = ks
                                   })
 
 replaceSorts :: VCAnnot a => Stmt a -> VCGen a (Stmt a)
@@ -88,11 +91,12 @@ replaceSorts (Seq stmts l)
   = flip Seq l <$> mapM replaceSorts stmts
 replaceSorts (ForEach x xs inv s l)
   = do g <- gets constrs
-       case M.lookup (process l) g of
-         Nothing -> 
-           ForEach x xs inv <$> replaceSorts s <*> pure l
-         Just ps ->
-           ForEach (liftSo x ps) xs inv <$> replaceSorts (subst (bvar x) xmap s) <*> pure l
+       ForEach x xs inv <$> replaceSorts s <*> pure l
+       -- case M.lookup (process l) g of
+       --   Nothing -> 
+       --     ForEach x xs inv <$> replaceSorts s <*> pure l
+       --   Just ps ->
+       --     ForEach (liftSo x ps) xs inv <$> replaceSorts (subst (bvar x) xmap s) <*> pure l
   where
     liftSo x ps = x { bsort = Map (SetIdx ps) (bsort x) }
     xmap        = Select (Var (bvar x)) (Var (process l))
@@ -145,6 +149,7 @@ prelude
                    , "(define-fun set_dif ((s1 Set) (s2 Set)) Set (set_cap s1 (set_com s2)))"
                    , "(define-fun set_sub ((s1 Set) (s2 Set)) Bool (= set_emp (set_dif s1 s2)))"
                    , "(define-fun set_minus ((s1 Set) (x Elt)) Set (set_dif s1 (set_add set_emp x)))"
+                   , "(declare-fun set_size (Set) Int)"
                    ]
 
 -------------------------------------------------------------------------------
@@ -155,17 +160,26 @@ wlp (Skip _) p
   = return p
 
 -- Fresh var
-wlp (Assign _ _ _ NonDetValue _) p
-  = return p
+wlp (Assign a x b NonDetValue c) p
+  = do x' <- freshBinder x
+       wlp (Assign a x b (Var (bvar x')) c) p
 
 wlp (Assign a x b e l) p
-  = do select <- isSet b
-       let v = case e of
-                 Var i | select -> Select e (Var b)
-                 _  -> e
+  = do select  <- isSet b
+       v <-  case e of
+               Var y | b == a -> do t <- getType y
+                                    ifM (isIndex t b)
+                                        (return $ Select e (Var b))
+                                        (return $ e)
+               Var y | select
+                       -> do t <- getType y
+                             ifM (isIndex t b)
+                                 (return $ Select e (Var b))
+                                 (return e)
+               _  -> return e
        ifM (isIndex (bsort x) pr)
-          (return $ subst (bvar x) (Store (Var i) (Var pr) v) p)
-          (return $ subst (bvar x) v p)
+           (return $ subst (bvar x) (Store (Var i) (Var pr) v) p)
+           (return $ subst (bvar x) v p)
   where
     i  = bvar x
     pr = process l
@@ -209,23 +223,25 @@ wlp (Par i is _ s _) p
   = do modify $ \s -> s { tenv = M.insert (pcName is) (Map (SetIdx is) Int) (tenv s) }
        addElem is i
        bs      <- vcBinds
-       let (acts, outs) = as bs
+       let (pc0, acts, outs) = as bs
            actsLocs     = replaceHere i is <$> acts
            exitCond     = Or [pcGuard i is x | x <- outs]
-       inv     <- actionsInvariant i0 is actsLocs
+
+       inv     <- actionsInvariant i is actsLocs
+
        let qInv = and [ inv
                       , pcGuard i0 is (-1) :=>: p
                       ]
            init = Forall [Bind i0 Int] $ and [ Atom SetMem (Var i0) (Var is)
-                                             , pcGuard i0 is 0
+                                             , pcGuard i0 is pc0
                                              ]
            initial = init :=>: Forall [Bind i0 Int] (subst i (Var i0) inv)
        txns    <- mapM (wlpAction i is qInv) actsLocs
        removeElem i
        return $ and ([initial] ++ txns ++ [Forall bs (qInv :=>: p)])
   where
-    as bs = actions i s (CFG 0 [] ([Bind i Int]++bs) M.empty)
-    i0 = i ++ "!"
+    as bs = actions i s bs
+    i0    = i ++ "!"
     --    let inv' = subst p (Var p0) inv
     -- p0   = p ++ "!!0"
        -- return (Forall [Bind p0 Int] inv')
@@ -236,6 +252,10 @@ wlp (Assert b pre _) p
          return (and [b, p])
        else
          return p
+
+wlp (Assume b _) p
+  = return (b :=>: p)
+
 wlp (If c s1 s2 _) p
   = do φ <- wlp s1 p
        ψ <- wlp s2 p
@@ -255,10 +275,15 @@ actionsInvariant :: (Show a, Process a)
                  -> [Action a]
                  -> VCGen a (Prop a)
 actionsInvariant p ps as
-  = and <$> mapM oneConj as
+  = do e <- gets tenv
+       p <- and <$> mapM (oneConj e) as
+       modify $ \st -> st { tenv = e }
+       return p
   where
-    oneConj (Action _ _ _ _ s)
-     = gathering $ wlp s TT
+    oneConj e (Action xs _ _ _ _ s)
+     = gathering $ do
+         modify $ \st -> st { tenv = M.union (tyEnv (dbg "xs" xs)) e }
+         wlp s TT
 
 -------------------------------------------------------------------------------
 -- Actions
@@ -269,14 +294,58 @@ wlpAction :: (Process a, Show a)
           -> Prop a
           -> Action a
           -> VCGen a (Prop a)
-wlpAction p ps inv (Action xs pcond i outs s)
-  = do inductive <- wlp s post
-       return $ Forall xs (g :=>: inductive)
+wlpAction p ps inv (Action xs us pcond i outs s)
+  = do ks        <- cardsFor ps
+       c0        <- gets constrs
+       xs0       <- gets tenv
+       let tenv' = tyEnv (dbg "xs" (Bind p Int :xs))
+       modify $ \st -> seq g st { constrs = M.union (M.fromList us) c0, tenv = tenv'  }
+       inductive <- wlp s post
+       modify $ \st -> st { constrs = c0, tenv = xs0 }
+       return $ Forall xs (Let (initialCards p ks (updateCandidates p us))
+                           (g :=>: inductive))
   where
     post    = or [ invAt o | o <- outLocs ]
     invAt l = subst (pcName ps) (Store (Var (pcName ps)) (Var p) (Const l)) inv
     outLocs = if null outs then [-1] else snd <$> outs
     g       = and [ pathGuard pcond, Atom SetMem (Var p) (Var ps), pcGuard p ps i, inv ]
+
+initialCards p ks qs  
+  = [ bind k p q | k <- ks, q <- qs ]
+  where
+    bind k p q = (Bind (initialBool k p q) Bool, PExpr (evalCardFormula k p q))
+
+updateCandidates :: Id -> [(Id, Id)] -> [Id]
+updateCandidates p us
+  = [ q | (q,qs) <- us, q /= p ]
+
+updateCard :: Card a -> Id -> [Id] -> Expr a
+updateCard k p qs
+  = Store kexp (Var p) updVal
+  where
+    updVal   = foldl' go (Select kexp (Var p)) qs
+    go a q   = Bin Plus a $ Bin Minus (Ite (incrCond q) (Const 1) (Const 0))
+                                      (Ite (decrCond q) (Const 1) (Const 0))
+    kexp     = Var (cardName k)
+    incrCond q = and [Not (PVar (initialBool k p q)), evalCardFormula k p q]
+    decrCond q = and [PVar (initialBool k p q), Not (evalCardFormula k p q)]
+
+initialBool :: Card a -> Id -> Id -> Id
+initialBool k p q
+  = cardName k ++ "!" ++ p ++ "!" ++ q
+
+-- initialVal k p
+--   = do cs <- M.toList <$> gets constrs
+--        let cs'   = [ evalCardFormula k p q | (qs,q) <- cs,  q /= p ]
+--        undefined
+--   where
+--     go (Const 0) q = evalCardFormula k p q
+--     go a         q = Bin Plus a (evalCardFormula k p q)
+
+evalCardFormula k p q
+  = subst (cardElem k) (Var q)
+          (subst (cardId k) (Var p) (cardProp k))
+  
 
 pathGuard :: [Prop a] -> Prop a
 pathGuard []   = TT
@@ -288,8 +357,8 @@ pcGuard p ps i = Atom Eq (pc ps p) (Const i)
 
 
 replaceHere :: t -> Id -> Action a -> Action a
-replaceHere _ ps (Action xs cond i outs s)
- = Action xs cond i outs (goStmt s)
+replaceHere _ ps (Action xs us cond i outs s)
+ = Action xs us cond i outs (goStmt s)
   where
     goStmt (Assert φ b l)
       = Assert (goProp φ) b l
@@ -330,10 +399,25 @@ replaceHere _ ps (Action xs cond i outs s)
 data VCState a = VCState { tenv  :: M.Map Id Sort
                          , constrs :: M.Map Id Id
                          , ictr :: Int
+                         , freshed :: [Binder]
                          , invs :: [(Int, [Binder], Prop a)]
+                         , cards :: [Card a]
                          , gather :: Bool
                          }
 type VCGen a r = State (VCState a) r 
+
+cardsFor :: Id -> VCGen a [Card a]
+cardsFor ps
+  = do cs <- gets cards
+       return $ [ c | c <- cs, cardOwner c == ps ]
+
+freshBinder :: Binder -> VCGen a Binder
+freshBinder (Bind x _)
+  = do i <- gets ictr
+       t <- getType x
+       let b' = Bind (x ++ "!" ++ show i) t
+       modify $ \s -> s { ictr = i + 1, freshed = b' : freshed s }
+       return b'
 
 gathering :: VCGen a b -> VCGen a b  
 gathering mact

@@ -8,5 +8,4 @@ fi
 
 FILE="$1"
 REWRITECMD="${REWRITE} -a $FILE"
-
-$REWRITECMD ## | briskly
+$REWRITECMD # | ./prettify #| briskly

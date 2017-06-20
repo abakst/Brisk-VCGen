@@ -67,19 +67,26 @@ iceTParser = whiteSpace >> program
 program :: Parser ParsedProgram
 program = do reserved "prog"  
              p <- parens $ do
-               _    <- ident
+               _     <- ident
                comma
-               vars <- list decl
+               decls <- list (fmap B decl <|> fmap C declCard)
                comma
-               p    <- functor "ensures" prop
+               p     <- functor "ensures" prop
                comma
                t     <- stmt
-               return Prog { decls = vars
-                           , ensures = p
-                           , prog  = t
+               let vars  = [ v | B v <- decls ]
+                   cards = [ k | C k <- decls ]
+               return Prog { decls     = vars
+                           , cardDecls = cards
+                           , ensures   = p
+                           , prog      = t
                            }
              dot
              return p
+  where
+    tryCards = try (comma >> list declCard) <|> return []
+
+data ParsedDecl a = B Binder | C (Card a)
 
 decl :: Parser Binder
 decl = do reserved "decl"
@@ -88,6 +95,19 @@ decl = do reserved "decl"
             comma
             s <- sort
             return $ Bind v s
+
+declCard :: Parser (Card a)
+declCard = functor "decl_card" $ do
+  nm    <- ident
+  comma
+  owner <- ident
+  comma
+  i     <- ident
+  comma
+  e     <- ident
+  comma
+  p     <- prop
+  return $ Card nm owner i e p
 
 sort :: Parser Sort
 sort = int <|> set <|> array
@@ -118,7 +138,14 @@ stmt =  skip
     <|> while
     <|> par
     <|> atomic
+    <|> havoc
     <|> pre <|> assert
+
+havoc = functor "havoc" $ do
+  p <- ident
+  comma
+  x <- ident
+  return (Assign p (Bind x Int) p NonDetValue p)
 
 pre        = do (Assert p _ w) <- functor "pre" $ assertBody
                 return (Assert p True w)
@@ -137,10 +164,8 @@ par = functor "sym" $ do
   s <- stmt
   return (Par p ps TT s "")
 
-atomic = do s <- functor "atomic" $ list stmt
-            case s of
-              [s'] -> return $ Atomic s' ""
-              _    -> return $ Atomic (Seq s "") ""
+atomic = do s <- functor "atomic" $ stmt
+            return (Atomic s "")
 
 skip, assignment, seqs, cases, foreach, while :: Parser (Stmt ParsedAnnot)
 skip = reserved "skip" >> return (Skip "")
@@ -270,14 +295,20 @@ atom = do e1 <- expr
           e2 <- expr
           return $ Atom r e1 e2
 
-rel =  (symbol "="  >> return Eq)
-   <|> (symbol "<=" >> return Le)
+rel =  try (reservedOp "=<"  >> return Le)
+   <|> (reservedOp "<"  >> return Lt)
+   <|> (reservedOp "=" >> return Eq)
 
 forallProp = functor "forall" $ do
   ds <- list decl
   comma
   p <- prop
   return $ Forall ds p
+existsProp = functor "exists" $ do
+  ds <- list decl
+  comma
+  p <- prop
+  return $ Exists ds p
 
 implies = functor "implies" $ do
   p1 <- prop
@@ -316,8 +347,12 @@ while = do reserved "While"
 
 expr = buildExpressionParser table term <?> "expression"
   where
-    table = [[Infix (reservedOp "+" >> return (Bin Plus)) AssocLeft]]
-    term  = num <|> var <|> sel <|> upd <|> ndet <?> "term"
+    table = [ [ Infix (reservedOp "*" >> return (Bin Mul)) AssocLeft
+              , Infix (reservedOp "/" >> return (Bin Div)) AssocLeft
+              ]
+            , [Infix (reservedOp "+" >> return (Bin Plus)) AssocLeft]
+            ]
+    term  = num <|> var <|> sel <|> set_add <|> size <|> upd <|> ndet <?> "term" 
 
 num = do i <- integer
          return $ Const (fromInteger i)
@@ -333,6 +368,15 @@ sel = functor "sel" sel'
      e2 <- expr
      return (Select e1 e2)
 
+set_add = functor "set_add" $ do
+  e1 <- expr
+  comma
+  e2 <- expr
+  return (Bin SetAdd e1 e2)
+
+size = functor "card" $ do
+  e <- expr
+  return (Size e)
 
 upd = functor "upd" $ do
   Store <$> expr <*> (comma >> expr) <*> (comma >> expr)
@@ -383,6 +427,7 @@ languageDef =
                                    , "false"
                                    , "implies"
                                    , "forall"
+                                   , "exists"
                                    , "and"
                                    , "or"
                                    , "not"
@@ -399,9 +444,12 @@ languageDef =
                                    , "assume"
                                    , "here"
                                    , "varOf"
+                                   , "havoc"
+                                   , "card"
+                                   , "decl_card"
                                    ]
            , Token.commentStart = "/*"
            , Token.commentEnd   = "*/"
            , Token.commentLine  = "//"
-           , Token.reservedOpNames = [ "+", "<", "<=" ]
+           , Token.reservedOpNames = [ "+", "<", "=<", "/", "=" ]
            }

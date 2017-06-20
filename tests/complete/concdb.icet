@@ -39,7 +39,7 @@ prog(concdb, Decls, ensures(Property), par([sym(C,c,Client), while(db, true, DBL
 		    req=0,
 		     ite(db, sel(domain,key)=1,
 		     assign(db,pair(response_tag, response_val),pair(0, 0)),
-		     seq([ assign(db,pair(response_tag, response_val), pair(1,_)),
+		     seq([ assign(db,pair(response_tag, response_val), pair(1,1)),
 		           assign(db,domain,upd(domain,key,1)),
 		           assign(db,the_db,upd(the_db,key,val))
 		         ])
