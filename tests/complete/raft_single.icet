@@ -19,6 +19,7 @@ prog(raft_single, Decls, ensures(Safety), Program) :-
             , decl(l, map(set(c), int))
             , decl(m, map(set(c), int))
             , decl(c0, int)
+            , decl(f0, int)
             
               /* k[c0] : #{f | f.term < c.term } */
             %% , decl_card(k, c, c0, f0, and([elem(f0,f),ref(fterm,f0) < ref(cterm,c0)]))
@@ -35,7 +36,10 @@ prog(raft_single, Decls, ensures(Safety), Program) :-
             %%                               ]))
             ]
     
-    , Safety=forall([decl(i,int)], implies(and([elem(i,c), ref(isLeader,i)=1]), card(f)/2 < ref(l,i) + ref(m,i)))
+    %% , Safety=forall([decl(i,int)], implies(and([elem(i,c), ref(isLeader,i)=1]), card(f)/2 < ref(l,i) + ref(m,i)))
+    , Safety=forall([decl(i,int), decl(j,int)], implies(and([elem(i,c), elem(j,c),
+                                                             ref(cterm,i)=ref(cterm,j),
+                                                             ref(isLeader,j)=1, ref(isLeader,i)=1]), i=j))
       
     , Program=par([sym(F, f, P1), sym(C, c, P2)])
     , P1=
@@ -81,11 +85,11 @@ prog(raft_single, Decls, ensures(Safety), Program) :-
 		for(C, F, f,
 		    seq([
              pre(C, forall([decl(i,int)], implies(elem(i,c), and([ ref(k,i)+ref(l,i)+ref(m,i) =< card(f)
-                                                                  , ref(count,i)=ref(l,i)+ref(m,i)])))),
+                                                                 , ref(count,i)=ref(l,i)+ref(m,i)])))),
 			 send(C, e_pid(F), pair(C, cterm)),
 			 recv(C, e_pid(F), success_c),
 			 if(C, ref(success_c,C)=1, assign(C, count, ref(count,C)+1)),
-             /* Ghost Updates */
+             /* Ghost Updates: these should be done automatically in the sequentialized variant */
              if(C,and([ref(votedFor,F)=C, ref(fterm,F)=ref(cterm,C)]), seq([
                  assign(C, l, ref(l,C) + 1)
                , assign(C, k, ref(k,C) - 1)
@@ -98,8 +102,33 @@ prog(raft_single, Decls, ensures(Safety), Program) :-
 			])
 		   ),
            group( 
-		         pre(C, forall([decl(i,int)], implies(and([elem(i,c), ref(isLeader,i)=1]), card(f)<ref(count,i)*2)))
-                , if(C, card(f)<2*ref(count,C), assign(C, isLeader, 1))
+  		          pre(C, forall([decl(i,int)], implies(and([elem(i,c), ref(isLeader,i)=1]), card(f)<ref(count,i)*2)))
+                , seq([assume(C,forall([decl(i,int)], 0 =< ref(k,i))),
+                       assume(C,forall([decl(i,int)], 0 =< ref(l,i))),
+                       assume(C,forall([decl(i,int)], 0 =< ref(m,i))),
+                       assume(C, elem(f0,f)),
+                       assume(C,forall([decl(i,int),decl(j,int)], 
+                                              implies( and([elem(i,c), elem(j,c), ref(l,i)+ref(m,i) > card(f)/2, ref(l,j)+ref(m,j) > card(f)/2])
+                                                     , 
+                                                              and([   ref(ref(votes,f0),ref(cterm,i))=i
+                                                                     , ref(ref(votes,f0),ref(cterm,j))=j
+                                                                     , or([ref(cterm,i) = ref(fterm,f0)
+                                                                           ,  ref(cterm,i) < ref(fterm,f0)])
+                                                                     , or([ref(cterm,j) = ref(fterm,f0)
+                                                                           , ref(cterm,j) < ref(fterm,f0)])
+                                                                  ])))),
+                       pre(C,forall([decl(i,int), decl(j,int)], implies(and([elem(i,c)
+                                                                           , elem(j,c)
+                                                                           , ref(count,i) > card(f)/2
+                                                                           , ref(count,j) > card(f)/2
+                                                                           , ref(cterm,i)=ref(cterm,j)
+                                                                           , ref(isLeader,j)=1
+                                                                           , ref(isLeader,i)=1
+                                                                            ])
+                                                                        , i=j))),
+                       if(C, card(f)<2*ref(count,C), assign(C, isLeader, 1))
+                      ])
+                       %% assume(forall([decl(i,int),decl(j,int)], and([elem(i,c),elem(j,c)])
            )                                                      
 	       ])
 .
