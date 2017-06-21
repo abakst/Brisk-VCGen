@@ -139,7 +139,7 @@ stmt =  skip
     <|> par
     <|> atomic
     <|> havoc
-    <|> pre <|> assert
+    <|> pre <|> assert <|> assume
 
 havoc = functor "havoc" $ do
   p <- ident
@@ -149,6 +149,11 @@ havoc = functor "havoc" $ do
 
 pre        = do (Assert p _ w) <- functor "pre" $ assertBody
                 return (Assert p True w)
+assume     = functor "assume" $ do
+  w <- ident
+  comma
+  p <- prop <?> "prop"
+  return (Assume p w)
 assert     = functor "assert" $ assertBody
 assertBody = do w <- ident
                 comma
@@ -350,7 +355,9 @@ expr = buildExpressionParser table term <?> "expression"
     table = [ [ Infix (reservedOp "*" >> return (Bin Mul)) AssocLeft
               , Infix (reservedOp "/" >> return (Bin Div)) AssocLeft
               ]
-            , [Infix (reservedOp "+" >> return (Bin Plus)) AssocLeft]
+            , [ Infix (reservedOp "+" >> return (Bin Plus)) AssocLeft
+              , Infix (reservedOp "-" >> return (Bin Minus)) AssocLeft
+              ]
             ]
     term  = num <|> var <|> sel <|> set_add <|> size <|> upd <|> ndet <?> "term" 
 
@@ -451,5 +458,5 @@ languageDef =
            , Token.commentStart = "/*"
            , Token.commentEnd   = "*/"
            , Token.commentLine  = "//"
-           , Token.reservedOpNames = [ "+", "<", "=<", "/", "=" ]
+           , Token.reservedOpNames = [ "-", "+", "<", "=<", "/", "=" ]
            }

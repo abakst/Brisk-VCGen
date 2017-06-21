@@ -193,7 +193,7 @@ pushForLoop p q x xs act
        vs0 <- gets binds
        p0  <- gets path
        modify $ \s -> s { binds = x : vs0
-                        , path = grd : p0
+                        , path  = grd : p0
                         }
        r  <- act
        modify $ \s -> s { binds = vs0, path = p0 }

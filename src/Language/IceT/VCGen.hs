@@ -111,6 +111,8 @@ replaceSorts (Atomic s l)
   = flip Atomic l <$> replaceSorts s
 replaceSorts s@(Assert _ _ _)
   = return s
+replaceSorts s@(Assume _ _)
+  = return s
 replaceSorts s@(Skip _)
   = return s
 replaceSorts s
@@ -165,8 +167,8 @@ wlp (Assign a x b NonDetValue c) p
        wlp (Assign a x b (Var (bvar x')) c) p
 
 wlp (Assign a x b e l) p
-  = do select  <- isSet b
-       v <-  case e of
+  = do select <- isSet b
+       v <-  case  e of
                Var y | b == a -> do t <- getType y
                                     ifM (isIndex t b)
                                         (return $ Select e (Var b))
@@ -177,9 +179,11 @@ wlp (Assign a x b e l) p
                                  (return $ Select e (Var b))
                                  (return e)
                _  -> return e
+       g <- gets constrs
+       
        ifM (isIndex (bsort x) pr)
-           (return $ subst (bvar x) (Store (Var i) (Var pr) v) p)
-           (return $ subst (bvar x) v p)
+             (return $ subst (bvar x) (Store (Var i) (Var pr) v) p)
+             (return $ subst (bvar x) v p)
   where
     i  = bvar x
     pr = process l
@@ -201,11 +205,11 @@ wlp (ForEach x xs (rest, i) s _) p
   = do addElem (bvar xs) (bvar x)
        i'  <- gathering $ wlp s TT
        let i'' = subst (bvar xs) erest i'
-       let inv = and [i, i'']
+       let inv = and [i, Forall [x] (and [ Atom SetMem ex erest ] :=>: i'')]
        pre <- wlp s $ subst rest (Bin SetAdd erest ex) inv
        removeElem (bvar x)
        return $ And [ subst rest EmptySet inv
-                    , Forall vs $ And [ inv
+                    , Forall vs $ and [ inv
                                       , Atom SetMem ex exs 
                                       , Not $ Atom SetMem ex erest
                                       ]
@@ -230,17 +234,17 @@ wlp (Par i is _ s _) p
        inv     <- actionsInvariant i is actsLocs
 
        let qInv = and [ inv
-                      , pcGuard i0 is (-1) :=>: p
-                      ]
+                      , (Forall [Bind i0 Int] (pcGuard i0 is (-1)))
+                      ] :=>: p
            init = Forall [Bind i0 Int] $ and [ Atom SetMem (Var i0) (Var is)
                                              , pcGuard i0 is pc0
                                              ]
            initial = init :=>: Forall [Bind i0 Int] (subst i (Var i0) inv)
-       txns    <- mapM (wlpAction i is qInv) actsLocs
+       txns    <- mapM (wlpAction i is inv) actsLocs
        removeElem i
-       return $ and ([initial] ++ txns ++ [Forall bs (qInv :=>: p)])
+       return $ and ([initial] ++  txns  ++ [Forall bs qInv])
   where
-    as bs = actions i s bs
+    as bs = actions i (dbg (render (pp s)) () `seq` s) bs
     i0    = i ++ "!"
     --    let inv' = subst p (Var p0) inv
     -- p0   = p ++ "!!0"
@@ -254,7 +258,8 @@ wlp (Assert b pre _) p
          return p
 
 wlp (Assume b _) p
-  = return (b :=>: p)
+  = do g <- gets gather
+       return (if g then p else b :=>: p)
 
 wlp (If c s1 s2 _) p
   = do φ <- wlp s1 p
@@ -263,6 +268,9 @@ wlp (If c s1 s2 _) p
                          NonDetProp -> [p, q]
                          _          -> [c :=>: p, Not c :=>: q]
        return . and $ guard φ ψ
+
+wlp (Atomic s _) p
+  = wlp s p
 
 wlp s _
   = error (printf "wlp TBD: %s" (show s))
@@ -276,13 +284,15 @@ actionsInvariant :: (Show a, Process a)
                  -> VCGen a (Prop a)
 actionsInvariant p ps as
   = do e <- gets tenv
-       p <- and <$> mapM (oneConj e) as
+       cs <- gets constrs
+       p <- and <$> mapM (oneConj e cs) as
        modify $ \st -> st { tenv = e }
        return p
   where
-    oneConj e (Action xs _ _ _ _ s)
+    oneConj e cs (Action xs us _ _ _ s)
      = gathering $ do
-         modify $ \st -> st { tenv = M.union (tyEnv (dbg "xs" xs)) e }
+         modify $ \st -> st { tenv = M.union (tyEnv xs) e }
+         forM us $ \(p,ps) -> addElem ps p
          wlp s TT
 
 -------------------------------------------------------------------------------
@@ -295,20 +305,25 @@ wlpAction :: (Process a, Show a)
           -> Action a
           -> VCGen a (Prop a)
 wlpAction p ps inv (Action xs us pcond i outs s)
-  = do ks        <- cardsFor ps
+  = do ks        <- gets cards
        c0        <- gets constrs
        xs0       <- gets tenv
-       let tenv' = tyEnv (dbg "xs" (Bind p Int :xs))
+       let tenv' = M.union (tyEnv (Bind p Int : xs)) xs0
        modify $ \st -> seq g st { constrs = M.union (M.fromList us) c0, tenv = tenv'  }
        inductive <- wlp s post
        modify $ \st -> st { constrs = c0, tenv = xs0 }
-       return $ Forall xs (Let (initialCards p ks (updateCandidates p us))
+       return $ Forall xs (Let (cardsInits ks ((p,ps):us)) {- }(initialCards p ks (updateCandidates p us)) -}
                            (g :=>: inductive))
   where
     post    = or [ invAt o | o <- outLocs ]
     invAt l = subst (pcName ps) (Store (Var (pcName ps)) (Var p) (Const l)) inv
     outLocs = if null outs then [-1] else snd <$> outs
     g       = and [ pathGuard pcond, Atom SetMem (Var p) (Var ps), pcGuard p ps i, inv ]
+
+cardsInits ks us
+  = [ bind k p q | k <- ks, (p,ps) <- us, cardOwner k == ps, (q,qs) <- us, ps /= qs ]
+  where
+    bind k p q = (Bind (initialBool k p q) Bool, PExpr (evalCardFormula k p q))
 
 initialCards p ks qs  
   = [ bind k p q | k <- ks, q <- qs ]
