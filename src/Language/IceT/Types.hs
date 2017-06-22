@@ -9,6 +9,12 @@ import Prelude hiding (and, or)
 import Control.Monad.State
 import Data.Map.Strict as M hiding (foldl')
 import Data.List as L hiding (and, or)
+import Text.Printf
+
+import Debug.Trace
+dbg :: Show a => String -> a -> a
+dbg msg x = trace (printf "[%s]: %s\n" msg (show x)) x
+
 -------------------------------------------------------------------------------
 -- Programs
 -------------------------------------------------------------------------------
@@ -99,7 +105,7 @@ data Index = SetIdx Id
            | IntIdx
   deriving (Eq, Show)
 
-data Rel = Eq | Le |  Lt | SetMem
+data Rel = Eq | Le | Lt | Gt | SetMem
   deriving (Eq, Show)
 
 pc :: Id -> Id -> Expr a
@@ -142,13 +148,21 @@ label s = evalState (mapM go s) 0
               put (i + 1)
               return (s, i)
 
-firstOf :: Stmt (a, Int) -> Int
+firstOf :: VCAnnot a => Stmt (a, Int) -> [Int]
+firstOf (Skip _)
+  = []
+firstOf (Assign _ _ _ _ (_,i))
+  = [i]
 firstOf (Atomic s (_,i))
-  = i
+  = [i]
 firstOf (Seq (s:ss) _)
   = firstOf s
 firstOf (ForEach _ _ _ s _)
   = firstOf s
+firstOf (If _ s1 s2 _)
+  = firstOf s1 ++ firstOf s2
+firstOf s
+  = error ("firstOf: " ++ show s)
 
 data CFG a = CFG { path  :: [Prop a]
                  , binds :: [Binder]
@@ -156,6 +170,12 @@ data CFG a = CFG { path  :: [Prop a]
                  , us    :: M.Map Id Id
                  }  
 type CfgM s a = State (CFG s) a
+
+updCfg m s outs
+  = foldl' (\m o ->
+              foldl' (\m i ->
+                        M.alter (ins i TT) o m) m (firstOf s)) m outs
+  
 toActions :: VCAnnot a => Id -> Stmt (a, Int) -> CfgM (a, Int) ([Int], [Action (a, Int)])
 toActions w (Atomic s (_, i))
   = do p  <- gets path
@@ -169,13 +189,13 @@ toActions w (Skip _)
 toActions w (ForEach x xs (r, i) s (l,_))
   = pushForLoop w (process l) x xs $ do
        (outs, as) <- toActions w s
-       modify $ \st -> st { m = foldl' (\m o -> M.alter (ins (firstOf s) TT) o m) (m st) outs }
+       modify $ \st -> st { m = updCfg (m st) s outs }
        return (outs, as)
 toActions w (Seq ss _) = do (last, as) <- foldM go ([], []) ss
                             return (last, concat as)
   where
     go (prev, s0) s = do (out, s') <- toActions w s
-                         modify $ \st -> st { m = foldl' (\m o -> M.alter (ins (firstOf s) TT) o m) (m st) prev }
+                         modify $ \st -> st { m = updCfg (m st) s prev }
                          return (out, s':s0)
 toActions w (If p s1 s2 l)
   = do p0          <- gets path
@@ -206,7 +226,7 @@ pushForLoop p q x xs act
 assgn :: Id -> Id -> Stmt ()
 assgn x y = Atomic (Assign "" (Bind x Int) "" (Var y) ()) ()
 
-actions :: VCAnnot a => Id -> Stmt a -> [Binder] -> (Int, [Action a], [Int])
+actions :: VCAnnot a => Id -> Stmt a -> [Binder] -> ([Int], [Action a], [Int])
 actions w s bs
   = (firstOf si, [ Action bs un ps i (getOuts i) s | Action bs un ps i _ s <- as0 ], outs)
   where

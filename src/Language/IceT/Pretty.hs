@@ -25,10 +25,12 @@ instance Pretty (Prop a) where
   pp FF = text "false"
   pp (Atom r e1 e2) = parens (pp e1 <+> pp r <+> pp e2)
   pp (Not p) = text "¬" <> parens (pp p)
-  pp (And ps) = text "⋀" <> brackets (hcat $ fmap pp ps)
-  pp (Or ps) = text "⋁" <> brackets (hcat $ fmap pp ps)
+  pp (And ps) = text "⋀" <> brackets (vcat (punctuate comma (map pp ps)))
+  pp (Or ps) = text "∨" <> brackets (hcat (punctuate comma (map pp ps)))
   pp (p :=>: q) = pp p <+> text "=>" <+> pp q
   pp (Forall xs p) = text "∀" <> hcat (punctuate comma (map pp xs)) <> text "."
+                 <+> pp p
+  pp (Exists xs p) = text "∃" <> hcat (punctuate comma (map pp xs)) <> text "."
                  <+> pp p
   pp (Here e) = text "here" <> parens (pp e)
   pp (NonDetProp) = text "*"
@@ -37,6 +39,7 @@ instance Pretty Rel where
   pp Eq = equals
   pp Le = text "≤"
   pp Lt = text "<"
+  pp Gt = text ">"
   pp SetMem = text "∈"
 
 instance Pretty (Expr a) where

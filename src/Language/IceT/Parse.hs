@@ -286,6 +286,7 @@ prop = (reserved "true"  >> return TT)
    <|> orProp
    <|> notProp
    <|> forallProp
+   <|> existsProp
    <|> elemProp
    <|> hereProp
    <|> doneProp
@@ -302,6 +303,7 @@ atom = do e1 <- expr
 
 rel =  try (reservedOp "=<"  >> return Le)
    <|> (reservedOp "<"  >> return Lt)
+   <|> (reservedOp ">"  >> return Gt)
    <|> (reservedOp "=" >> return Eq)
 
 forallProp = functor "forall" $ do
@@ -458,5 +460,5 @@ languageDef =
            , Token.commentStart = "/*"
            , Token.commentEnd   = "*/"
            , Token.commentLine  = "//"
-           , Token.reservedOpNames = [ "-", "+", "<", "=<", "/", "=" ]
+           , Token.reservedOpNames = [ "-", "+", "<", "=<", "/", "=", ">" ]
            }

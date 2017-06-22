@@ -57,5 +57,6 @@ instance SMT Op where
 instance SMT Rel where
   smt Eq     = text "="
   smt Lt     = text "<"
+  smt Gt     = text ">"
   smt Le     = text "<="
   smt SetMem = text "set_mem"

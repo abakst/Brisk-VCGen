@@ -18,8 +18,7 @@ import System.Process
 import GHC.IO.Handle
 
 import Debug.Trace
-dbg :: Show a => String -> a -> a
-dbg msg x = trace (printf "[%s]: %s\n" msg (show x)) x
+dbgPP msg x = trace (printf "[%s]: %s\n" msg (show (pp x))) x
 -------------------------------------------------------------------------------
 -- IO one-stop-shop
 -------------------------------------------------------------------------------
@@ -43,7 +42,7 @@ verify p
   = do (inp, out, err, pid) <- runInteractiveProcess "z3" ["-smt2", "-in"] Nothing Nothing
        hPutStr inp vcstr
        -- putStrLn vcstr
-       writeFile ".query.icet" (render (pp (prog p)))
+       writeFile ".query.icet" (render (pp (coalesceLocal (prog p))))
        writeFile ".query.smt2" vcstr
        hFlush inp
        ec   <- waitForProcess pid
@@ -73,7 +72,7 @@ vcGen g ks s p
   where
     γ        = tyEnv g
     bs       = fmap (uncurry Bind) . M.toList $ tenv st
-    (vc, st) = runState (replaceSorts s >>= flip wlp  p)
+    (vc, st) = runState (replaceSorts (coalesceLocal s) >>= flip wlp  p)
                          (VCState { tenv = γ
                                   , constrs = M.empty
                                   , freshed = []
@@ -117,6 +116,59 @@ replaceSorts s@(Skip _)
   = return s
 replaceSorts s
   = error (printf "replaceSorts: %s" (show s))
+
+coalesceLocal :: VCAnnot a => Stmt a -> Stmt a
+coalesceLocal (Atomic s l)
+  = Atomic s l
+coalesceLocal (Par x xs sym s l)
+  = Par x xs sym (coalesceLocal s) l
+coalesceLocal (Seq [] l)
+  = Skip l
+coalesceLocal (Seq stmts@(s0:rest) l)
+  | null pre
+  = seqStmts l [coalesceLocal s0, coalesceLocal (Seq (coalesceLocal <$> rest) l)]
+  | otherwise
+  = seqStmts l [Atomic (seqStmts l pre) l, post']
+  where
+    (pre, post) = break (not . isLocal) stmts
+    post'       = coalesceLocal (seqStmts l (coalesceLocal <$> post))
+coalesceLocal (If p s1 s2 l)
+  = If p (coalesceLocal s1) (coalesceLocal s2) l
+coalesceLocal s = s
+
+seqStmts :: a -> [Stmt a] -> Stmt a    
+seqStmts l = flattenSeq . flip Seq l
+
+flattenSeq :: Stmt  a -> Stmt a
+flattenSeq (Seq ss l)
+  = dropSingleton
+  . simplifySkips
+  $ Seq (foldl go [] ss') l
+  where
+    go ss (Seq ss' l) = ss ++ (foldl go [] ss')
+    go ss (Skip _)    = ss
+    go ss s           = ss ++ [s]
+    ss'               = flattenSeq <$> ss
+    dropSingleton (Seq [] l)  = Skip l
+    dropSingleton (Seq [s] _) = s
+    dropSingleton s           = s
+flattenSeq (ForEach x y inv s l)
+  = ForEach x y inv (flattenSeq s) l
+flattenSeq s
+  = s
+
+simplifySkips :: Stmt a -> Stmt a
+simplifySkips (Seq ss l) = Seq ss' l
+  where ss'    = filter (not . isSkip) ss
+        isSkip (Skip _) = True
+        isSkip _        = False
+
+isLocal (Assign p _ q _ _) = p == q
+isLocal (Skip _)           = True
+isLocal (Assert _ _ _)     = True
+isLocal (Assume _ _)       = True
+isLocal _                  = False
+  
 
 isIndex :: Sort -> Id -> VCGen a Bool
 isIndex (Map (SetIdx ps) _) p
@@ -237,18 +289,15 @@ wlp (Par i is _ s _) p
                       , (Forall [Bind i0 Int] (pcGuard i0 is (-1)))
                       ] :=>: p
            init = Forall [Bind i0 Int] $ and [ Atom SetMem (Var i0) (Var is)
-                                             , pcGuard i0 is pc0
+                                             , or [ pcGuard i0 is pc0i | pc0i <- pc0 ]
                                              ]
            initial = init :=>: Forall [Bind i0 Int] (subst i (Var i0) inv)
        txns    <- mapM (wlpAction i is inv) actsLocs
        removeElem i
-       return $ and ([initial] ++  txns  ++ [Forall bs qInv])
+       return $ and ([initial] ++ txns ++ [Forall bs qInv]) 
   where
-    as bs = actions i (dbg (render (pp s)) () `seq` s) bs
+    as bs = actions i s bs
     i0    = i ++ "!"
-    --    let inv' = subst p (Var p0) inv
-    -- p0   = p ++ "!!0"
-       -- return (Forall [Bind p0 Int] inv')
 
 wlp (Assert b pre _) p
   = do g <- gets gather
@@ -315,7 +364,7 @@ wlpAction p ps inv (Action xs us pcond i outs s)
        return $ Forall xs (Let (cardsInits ks ((p,ps):us)) {- }(initialCards p ks (updateCandidates p us)) -}
                            (g :=>: inductive))
   where
-    post    = or [ invAt o | o <- outLocs ]
+    post    = and [ invAt o | o <- outLocs ]
     invAt l = subst (pcName ps) (Store (Var (pcName ps)) (Var p) (Const l)) inv
     outLocs = if null outs then [-1] else snd <$> outs
     g       = and [ pathGuard pcond, Atom SetMem (Var p) (Var ps), pcGuard p ps i, inv ]

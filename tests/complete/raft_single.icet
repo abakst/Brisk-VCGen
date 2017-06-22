@@ -90,15 +90,19 @@ prog(raft_single, Decls, ensures(Safety), Program) :-
 			 recv(C, e_pid(F), success_c),
 			 if(C, ref(success_c,C)=1, assign(C, count, ref(count,C)+1)),
              /* Ghost Updates: these should be done automatically in the sequentialized variant */
-             if(C,and([ref(votedFor,F)=C, ref(fterm,F)=ref(cterm,C)]), seq([
+             if(C,and([ref(success_c,C)=1,ref(votedFor,F)=C, ref(fterm,F)=ref(cterm,C)]), seq([
                  assign(C, l, ref(l,C) + 1)
                , assign(C, k, ref(k,C) - 1)
-               , assign(c0, l, upd(l, c0, ref(l,c0)-1))
-               , assign(c0, m, upd(m, c0, ref(m,c0)+1))
-               , assume(C, 0 =< ref(k,C))
                , assume(C, 0 < ref(l,C))
-             ]))
-                                                
+               , assume(C, 0 =< ref(k,C))
+             ])),
+             /* Assume there is some c0 who needs to move from l to m */
+             if(C,and([ref(success_c,C)=1,ref(fterm,F) > ref(cterm,c0), ref(ref(votes,F),ref(cterm,c0))=c0]), seq([
+                 assign(c0, l, upd(l, c0, ref(l,c0)-1))
+               , assign(c0, m, upd(m, c0, ref(m,c0)+1))
+               , assume(C, 0 < ref(m,c0))
+               , assume(C, 0 =< ref(l,c0))
+               ]))
 			])
 		   ),
            group( 
