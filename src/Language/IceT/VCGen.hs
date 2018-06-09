@@ -216,6 +216,8 @@ wlp (Skip _) p
 -- Fresh var
 wlp (Assign a x b NonDetValue c) p
   = do x' <- freshBinder x
+       t <- getType b
+       modify $ \s -> s { tenv = M.insert (bvar x') (bsort x') (tenv s) }
        wlp (Assign a x b (Var (bvar x')) c) p
 
 wlp (Assign a x b e l) p
