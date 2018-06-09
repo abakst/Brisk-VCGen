@@ -68,7 +68,7 @@ vcGen :: VCAnnot a
       -> Prop a
       -> Doc
 vcGen g ks s p
-  = vcat (prelude : declBinds bs ++ declBinds (freshed st) ++ [checkValid vc])
+  = vcat (prelude : declBinds bs ++  [checkValid vc])
   where
     γ        = tyEnv g
     bs       = fmap (uncurry Bind) . M.toList $ tenv st
@@ -216,8 +216,6 @@ wlp (Skip _) p
 -- Fresh var
 wlp (Assign a x b NonDetValue c) p
   = do x' <- freshBinder x
-       t <- getType b
-       modify $ \s -> s { tenv = M.insert (bvar x') (bsort x') (tenv s) }
        wlp (Assign a x b (Var (bvar x')) c) p
 
 wlp (Assign a x b e l) p
@@ -481,8 +479,9 @@ freshBinder :: Binder -> VCGen a Binder
 freshBinder (Bind x _)
   = do i <- gets ictr
        t <- getType x
-       let b' = Bind (x ++ "!" ++ show i) t
-       modify $ \s -> s { ictr = i + 1, freshed = b' : freshed s }
+       let var = (x ++ "!" ++ show i)
+       let b' = Bind var t
+       modify $ \s -> s { ictr = i + 1, freshed = b' : freshed s, tenv = M.insert var  t (tenv s)}
        return b'
 
 gathering :: VCGen a b -> VCGen a b  
