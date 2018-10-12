@@ -230,8 +230,6 @@ wlp (Assign a x b e l) p
                              ifM (isIndex t b)
                                  (return $ Select e (Var b))
                                  (return e)
-               Store m x y ->
-                          do (return $ Store (Select m (Var b)) (Select x (Var b)) (Select y (Var b)))
                _  -> return e
        g <- gets constrs
        
